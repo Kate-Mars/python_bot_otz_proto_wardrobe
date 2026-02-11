@@ -29,7 +29,7 @@ if not TOKEN:
 SITE_URL = os.environ.get('SITE_URL', 'https://admin-smudge-10931819.figma.site/')
 
 # ID администраторов (замените на ваш ID)
-ADMIN_IDS = [5227791450]  # Ваш ID
+ADMIN_IDS = [5227791450, 1335650416]  # Ваш ID
 
 # Создаем папки для хранения файлов
 if not os.path.exists('videos'):
