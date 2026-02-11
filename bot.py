@@ -2,8 +2,13 @@ import logging
 import os
 import json
 import datetime
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputMediaVideo
+import asyncio
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+
+# Для Render - добавляем Flask для поддержания активности
+from flask import Flask
+from threading import Thread
 
 # Состояния диалога
 (RATING, INTUITIVE, SLOW_ACTION, CRITICAL_FEATURES, COMPETITORS, IMPROVEMENTS, WISHES, VIDEO) = range(8)
@@ -15,22 +20,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Токен вашего бота (получите у @BotFather)
+# Токен из переменных окружения Render
 TOKEN = os.environ.get('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("Нет токена! Добавьте BOT_TOKEN в переменные окружения Render")
+
 # Ссылка на ваш сайт/приложение
-SITE_URL = 'https://admin-smudge-10931819.figma.site/'
+SITE_URL = os.environ.get('SITE_URL', 'https://admin-smudge-10931819.figma.site/')
 
 # ID администраторов (замените на ваш ID)
-ADMIN_IDS = [5227791450]  # Добавьте свои ID через запятую
+ADMIN_IDS = [5227791450]  # Ваш ID
 
 # Создаем папки для хранения файлов
 if not os.path.exists('videos'):
     os.makedirs('videos')
 if not os.path.exists('feedbacks'):
     os.makedirs('feedbacks')
-if not os.path.exists('temp'):
-    os.makedirs('temp')
 
+# ------------------------------------------------------------
+# Flask сервер для поддержания активности на Render
+# ------------------------------------------------------------
+app = Flask(__name__)
+
+
+@app.route('/')
+def home():
+    return "🤖 Бот для сбора отзывов работает!"
+
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+    logger.info(f"🌐 Flask сервер запущен на порту {os.environ.get('PORT', 10000)}")
+
+
+# ------------------------------------------------------------
+# Функции бота
+# ------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветственное сообщение со ссылкой на сайт"""
@@ -44,7 +81,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Мы хотим сделать приложение максимально удобным, поэтому зададим несколько важных вопросов о вашем опыте использования.
 """
-
     await update.message.reply_text(welcome_message)
 
     # Запрашиваем оценку
@@ -230,7 +266,6 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def finish_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершаем сбор отзывов и сохраняем данные"""
-
     feedback = context.user_data
     user = update.effective_user
 
@@ -265,7 +300,6 @@ async def finish_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     await update.message.reply_text(summary, parse_mode='Markdown')
-
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -307,9 +341,7 @@ def save_feedback(user_id, username, first_name, feedback):
 
 
 async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ГЛАВНАЯ КОМАНДА: Показывает ВСЕ отзывы пользователей вместе с видео одной командой"""
-
-    # Проверка прав администратора
+    """Показывает ВСЕ отзывы пользователей вместе с видео"""
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
         return
@@ -317,7 +349,6 @@ async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("🔍 Загружаю все отзывы с видео... Это может занять некоторое время.")
 
     try:
-        # Загружаем все отзывы
         with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
             feedbacks = json.load(f)
 
@@ -325,7 +356,6 @@ async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("📭 Пока нет ни одного отзыва.")
             return
 
-        # Отправляем общую статистику
         total = len(feedbacks)
         videos_count = count_videos()
 
@@ -338,24 +368,16 @@ async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
         await update.message.reply_text(stats, parse_mode='Markdown')
-
-        # Отправляем отзывы с видео
         await update.message.reply_text("📦 **НАЧАЛО ЗАГРУЗКИ ВСЕХ ОТЗЫВОВ**", parse_mode='Markdown')
 
-        # Сортируем отзывы от новых к старым
         feedbacks.reverse()
 
         for idx, fb in enumerate(feedbacks, 1):
-            # Формируем сообщение с отзывом
             feedback_text = format_feedback_message(fb, idx, total)
-
-            # Проверяем, есть ли видео
             video_info = fb.get('video')
 
             if isinstance(video_info, dict) and 'file_name' in video_info:
-                # Если есть видео - отправляем его с текстом отзыва
                 video_path = video_info['file_name']
-
                 if os.path.exists(video_path):
                     try:
                         with open(video_path, 'rb') as video_file:
@@ -363,35 +385,20 @@ async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TY
                                 video=video_file,
                                 caption=feedback_text,
                                 parse_mode='Markdown',
-                                supports_streaming=True,
-                                width=video_info.get('width'),
-                                height=video_info.get('height'),
-                                duration=video_info.get('duration')
+                                supports_streaming=True
                             )
                     except Exception as e:
-                        logger.error(f"Ошибка отправки видео {video_path}: {e}")
-                        # Если не удалось отправить видео, отправляем только текст
-                        await update.message.reply_text(
-                            f"{feedback_text}\n\n❌ *Видео недоступно*",
-                            parse_mode='Markdown'
-                        )
+                        logger.error(f"Ошибка отправки видео: {e}")
+                        await update.message.reply_text(f"{feedback_text}\n\n❌ *Видео недоступно*",
+                                                        parse_mode='Markdown')
                 else:
-                    # Если файл не найден
-                    await update.message.reply_text(
-                        f"{feedback_text}\n\n❌ *Видео файл не найден*",
-                        parse_mode='Markdown'
-                    )
+                    await update.message.reply_text(f"{feedback_text}\n\n❌ *Видео файл не найден*",
+                                                    parse_mode='Markdown')
             else:
-                # Если видео нет - отправляем только текст
-                await update.message.reply_text(
-                    feedback_text,
-                    parse_mode='Markdown'
-                )
+                await update.message.reply_text(feedback_text, parse_mode='Markdown')
 
-            # Небольшая задержка чтобы не флудить
             await asyncio.sleep(0.5)
 
-        # Финальное сообщение
         await update.message.reply_text(
             "✅ **ЗАГРУЗКА ЗАВЕРШЕНА**\n\n"
             f"Всего загружено: {total} отзывов\n"
@@ -408,12 +415,9 @@ async def all_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 def format_feedback_message(fb, index, total):
     """Форматирование отзыва для отправки"""
-
-    # Определяем рейтинг в звездах
     rating_stars = fb.get('rating', 'Не указано')
     rating_value = rating_stars.count('⭐') if '⭐' in rating_stars else '?'
 
-    # Форматируем текст отзыва
     text = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 **ОТЗЫВ #{index} ИЗ {total}**
@@ -427,10 +431,10 @@ def format_feedback_message(fb, index, total):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-**🔄 ИНТУИТИВНОСТЬ И СЛОЖНЫЕ МЕСТА:**
+**🔄 ИНТУИТИВНОСТЬ:**
 {fb.get('intuitive', 'Пропущено')}
 
-**⏱️ САМЫЕ ДОЛГИЕ ДЕЙСТВИЯ:**
+**⏱️ ДОЛГИЕ ДЕЙСТВИЯ:**
 {fb.get('slow_action', 'Пропущено')}
 
 **🎯 КРИТИЧЕСКИЕ ФУНКЦИИ:**
@@ -452,13 +456,11 @@ def format_feedback_message(fb, index, total):
 
 async def feedbacks_by_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает отзывы за определенную дату"""
-
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
         return
 
     try:
-        # Получаем дату из аргументов
         args = context.args
         if not args:
             await update.message.reply_text(
@@ -473,11 +475,7 @@ async def feedbacks_by_date_command(update: Update, context: ContextTypes.DEFAUL
         with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
             feedbacks = json.load(f)
 
-        # Фильтруем отзывы по дате
-        date_feedbacks = []
-        for fb in feedbacks:
-            if fb['timestamp'][:10] == target_date:
-                date_feedbacks.append(fb)
+        date_feedbacks = [fb for fb in feedbacks if fb['timestamp'][:10] == target_date]
 
         if not date_feedbacks:
             await update.message.reply_text(f"📭 Нет отзывов за {target_date}")
@@ -496,7 +494,6 @@ async def feedbacks_by_date_command(update: Update, context: ContextTypes.DEFAUL
 
 async def export_feedbacks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Экспорт всех отзывов в JSON файл"""
-
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
         return
@@ -505,17 +502,17 @@ async def export_feedbacks_command(update: Update, context: ContextTypes.DEFAULT
         with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
             feedbacks = json.load(f)
 
-        # Создаем резервную копию
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         backup_file = f'feedbacks/backup_feedbacks_{timestamp}.json'
 
         with open(backup_file, 'w', encoding='utf-8') as f:
             json.dump(feedbacks, f, ensure_ascii=False, indent=2)
 
-        await update.message.reply_document(
-            document=open(backup_file, 'rb'),
-            caption=f"📊 Экспорт отзывов ({len(feedbacks)} записей)\n📅 {timestamp}"
-        )
+        with open(backup_file, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                caption=f"📊 Экспорт отзывов ({len(feedbacks)} записей)\n📅 {timestamp}"
+            )
 
     except FileNotFoundError:
         await update.message.reply_text("📭 Файл с отзывами не найден.")
@@ -535,12 +532,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /stats - Показать общую статистику
 
 **🔸 Команды для администратора:**
-/all_feedbacks - **ПОКАЗАТЬ ВСЕ ОТЗЫВЫ С ВИДЕО** 🎥
-/feedbacks_by_date [дата] - Отзывы за дату (ГГГГ-ММ-ДД)
-/export_feedbacks - Выгрузить все отзывы в JSON
-/admin - Краткий просмотр последних отзывов
-/videos list - Список всех видео
-/videos send [номер] - Отправить видео
+/all_feedbacks - **ВСЕ ОТЗЫВЫ С ВИДЕО** 🎥
+/feedbacks_by_date - Отзывы за дату
+/export_feedbacks - Выгрузить в JSON
+/admin - Краткий просмотр
+/videos - Список видео
 
 **Как отвечать:**
 • Отправьте '-' чтобы пропустить вопрос
@@ -563,19 +559,22 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Краткий просмотр последних отзывов"""
-    if update.effective_user.id in ADMIN_IDS:
-        try:
-            with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
-                feedbacks = json.load(f)
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
+        return
 
-            if not feedbacks:
-                await update.message.reply_text("📭 Пока нет ни одного отзыва.")
-                return
+    try:
+        with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
+            feedbacks = json.load(f)
 
-            total = len(feedbacks)
-            ratings = [fb['rating'] for fb in feedbacks if '⭐' in fb['rating']]
+        if not feedbacks:
+            await update.message.reply_text("📭 Пока нет ни одного отзыва.")
+            return
 
-            stats = f"""
+        total = len(feedbacks)
+        ratings = [fb['rating'] for fb in feedbacks if '⭐' in fb['rating']]
+
+        stats = f"""
 📊 **КРАТКАЯ СТАТИСТИКА**
 ━━━━━━━━━━━━━━━━━━
 📝 Всего отзывов: {total}
@@ -583,25 +582,48 @@ async def show_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎥 Всего видео: {count_videos()}
 ━━━━━━━━━━━━━━━━━━
 """
-            await update.message.reply_text(stats, parse_mode='Markdown')
+        await update.message.reply_text(stats, parse_mode='Markdown')
+        await update.message.reply_text("📌 **ПОСЛЕДНИЕ 3 ОТЗЫВА:**", parse_mode='Markdown')
 
-            await update.message.reply_text("📌 **ПОСЛЕДНИЕ 3 ОТЗЫВА:**", parse_mode='Markdown')
-
-            recent_feedbacks = feedbacks[-3:]
-            for fb in recent_feedbacks:
-                video_status = "✅" if isinstance(fb.get('video'), dict) else "❌"
-                text = f"""
+        recent_feedbacks = feedbacks[-3:]
+        for fb in recent_feedbacks:
+            video_status = "✅" if isinstance(fb.get('video'), dict) else "❌"
+            text = f"""
 👤 **{fb['first_name']}** (@{fb['username']})
 ⭐ {fb['rating']} {video_status}
 📅 {fb['timestamp'][:16]}
 💡 {fb['improvements'][:100]}{'...' if len(fb['improvements']) > 100 else ''}
 """
-                await update.message.reply_text(text, parse_mode='Markdown')
+            await update.message.reply_text(text, parse_mode='Markdown')
 
-        except FileNotFoundError:
-            await update.message.reply_text("📭 Файл с отзывами еще не создан.")
-    else:
+    except FileNotFoundError:
+        await update.message.reply_text("📭 Файл с отзывами еще не создан.")
+
+
+async def get_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для получения списка видео"""
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
+        return
+
+    try:
+        video_files = []
+        for filename in os.listdir('videos'):
+            if filename.endswith(('.mp4', '.mov', '.avi')):
+                video_files.append(filename)
+
+        if not video_files:
+            await update.message.reply_text("📭 Нет загруженных видео.")
+            return
+
+        text = f"🎥 **Всего видео:** {len(video_files)}\n\n"
+        for i, filename in enumerate(sorted(video_files, reverse=True)[:20], 1):
+            text += f"{i}. `{filename}`\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 
 def count_videos():
@@ -630,7 +652,7 @@ def calculate_average_rating(ratings):
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для просмотра статистики (доступна всем)"""
+    """Команда для просмотра статистики"""
     try:
         with open('feedbacks/feedbacks.json', 'r', encoding='utf-8') as f:
             feedbacks = json.load(f)
@@ -667,12 +689,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Пока нет ни одного отзыва. Будьте первым! 🎉")
 
 
-# Импортируем asyncio для задержек
-import asyncio
-
-
 def main():
     """Запуск бота"""
+    # Запускаем Flask сервер для Render
+    keep_alive()
+
+    # Создаем приложение бота
     application = Application.builder().token(TOKEN).build()
 
     # Обработчик диалога
@@ -699,98 +721,27 @@ def main():
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('admin', show_feedbacks))
     application.add_handler(CommandHandler('stats', stats_command))
-
-    # НОВАЯ ГЛАВНАЯ КОМАНДА ДЛЯ АДМИНА
     application.add_handler(CommandHandler('all_feedbacks', all_feedbacks_command))
-
-    # Дополнительные команды для админа
     application.add_handler(CommandHandler('feedbacks_by_date', feedbacks_by_date_command))
     application.add_handler(CommandHandler('export_feedbacks', export_feedbacks_command))
-
-    # Команды для работы с видео (оставляем для обратной совместимости)
     application.add_handler(CommandHandler('videos', get_videos_command))
-    application.add_handler(CommandHandler('send_video', send_video_command))
-    application.add_handler(CommandHandler('send_all_videos', send_all_videos_command))
-    application.add_handler(CommandHandler('user_videos', get_user_videos_command))
 
-    print("=" * 50)
-    print("🤖 БОТ ДЛЯ СБОРА UX-ОТЗЫВОВ ЗАПУЩЕН!")
-    print("=" * 50)
+    print("=" * 60)
+    print("✅ БОТ УСПЕШНО ЗАПУЩЕН НА RENDER!")
+    print("=" * 60)
+    print(f"🤖 Токен: {TOKEN[:10]}...")
     print(f"🌐 Сайт: {SITE_URL}")
-    print(f"📁 Папка для видео: videos/")
-    print(f"📁 Папка для отзывов: feedbacks/")
-    print(f"👑 Администраторы: {ADMIN_IDS}")
-    print("\n📊 ГЛАВНАЯ КОМАНДА АДМИНИСТРАТОРА:")
-    print("  🔥 /all_feedbacks - ПОКАЗАТЬ ВСЕ ОТЗЫВЫ С ВИДЕО")
-    print("\n📋 Другие команды админа:")
-    print("  /feedbacks_by_date - отзывы за дату")
-    print("  /export_feedbacks - выгрузить в JSON")
-    print("  /admin - краткий просмотр")
-    print("  /videos list - список видео")
-    print("\n📝 Нажмите Ctrl+C для остановки")
-    print("=" * 50)
+    print(f"👑 Админ ID: {ADMIN_IDS[0]}")
+    print(f"📁 Папка видео: videos/")
+    print(f"📁 Папка отзывов: feedbacks/")
+    print("=" * 60)
+    print("📊 Команды:")
+    print("  /all_feedbacks - все отзывы с видео")
+    print("  /stats - общая статистика")
+    print("  /admin - последние отзывы")
+    print("=" * 60)
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-# Добавляем недостающие функции для видео (из предыдущего кода)
-async def get_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для получения списка видео"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
-        return
-
-    try:
-        video_files = []
-        for filename in os.listdir('videos'):
-            if filename.endswith(('.mp4', '.mov', '.avi')):
-                filepath = os.path.join('videos', filename)
-                created_time = os.path.getctime(filepath)
-                video_files.append((filename, filepath, created_time))
-
-        video_files.sort(key=lambda x: x[2], reverse=True)
-
-        if not video_files:
-            await update.message.reply_text("📭 Нет загруженных видео.")
-            return
-
-        text = f"🎥 **Всего видео:** {len(video_files)}\n\n"
-        for i, (filename, _, _) in enumerate(video_files[:20], 1):
-            user_id = filename.split('_')[1] if '_' in filename else 'unknown'
-            text += f"{i}. `{filename}` (user: {user_id})\n"
-
-        await update.message.reply_text(text, parse_mode='Markdown')
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-
-
-async def send_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправка конкретного видео"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
-        return
-
-    # Функция для обратной совместимости
-    await update.message.reply_text("ℹ️ Используйте /all_feedbacks для просмотра всех отзывов с видео")
-
-
-async def send_all_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправка всех видео"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
-        return
-
-    await update.message.reply_text("ℹ️ Используйте /all_feedbacks для просмотра всех отзывов с видео")
-
-
-async def get_user_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение видео конкретного пользователя"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ У вас нет доступа к этой команде.")
-        return
-
-    await update.message.reply_text("ℹ️ Используйте /all_feedbacks для просмотра всех отзывов с видео")
 
 
 if __name__ == '__main__':
